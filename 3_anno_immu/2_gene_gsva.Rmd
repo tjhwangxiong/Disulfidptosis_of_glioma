@@ -1,0 +1,74 @@
+---
+title: "anno"
+author: "生信技能树"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message = F,warning = F)
+```
+
+### 1. GSVA
+
+```{r fig.height=8,fig.width=12}
+rm(list = ls())
+library(GSVA)
+library(msigdbr)
+KEGG_df = msigdbr(species = "Homo sapiens",category = "C2",subcategory = "CP:KEGG") %>% 
+  dplyr::select(gs_exact_source,gs_name,gene_symbol)
+head(KEGG_df)
+GO_df = msigdbr(species = "Homo sapiens",category = "C5") %>% 
+  dplyr::select(gene_symbol,gs_exact_source,gs_subcat,gs_name)
+dim(GO_df)
+kegg_list = split(KEGG_df$gene_symbol,KEGG_df$gs_exact_source)
+lapply(kegg_list[1:3], head)
+load("../1_data_pre/exp_surv1.Rdata")
+
+GO_df2 = GO_df[GO_df$gs_subcat=="GO:BP",]
+GO_list = split(GO_df2$gene_symbol,GO_df2$gs_exact_source)
+lapply(GO_list[1:3], head)
+f = "gsva.Rdata"
+if(!file.exists(f)){
+  KEGG_ES <- gsva(expr=exp1, 
+               gset.idx.list=kegg_list, 
+               parallel.sz=10)
+  GO_ES <- gsva(expr=exp1, 
+               gset.idx.list=GO_list, 
+               parallel.sz=10)
+  save(KEGG_ES,GO_ES,file = f)
+}
+load(f)
+```
+
+```{r fig.height=6,fig.width=12}
+load("../2_model/model_genes_survs.Rdata")
+library(limma)
+design = model.matrix(~survs[[1]]$Risk)
+fit = lmFit(KEGG_ES, design)
+fit = eBayes(fit)
+DEG_KEGG = topTable(fit, coef = 2, number = Inf)
+head(DEG_KEGG)
+
+fit2 = lmFit(GO_ES, design)
+fit2 = eBayes(fit2)
+DEG_GO = topTable(fit2, coef = 2, number = Inf)
+head(DEG_GO)
+
+top20_kegg = head(rownames(DEG_KEGG)[order(DEG_KEGG$logFC,decreasing = T)],20)
+top20_go = head(rownames(DEG_GO)[order(DEG_GO$logFC,decreasing = T)],20)
+n = KEGG_ES[top20_kegg,]
+n = n[,order(survs[[1]]$fp)]
+rownames(n) = KEGG_df$gs_name[match(rownames(n),KEGG_df$gs_exact_source)]
+g = sort(survs[[1]]$Risk)
+draw_heatmap(n,g,show_rownames = T,cluster_cols = F,scale = F,legend = T,annotation_legend = T)
+```
+
+```{r fig.height=8,fig.width=16}
+n2 = GO_ES[top20_go,]
+n2 = n2[,order(survs[[1]]$fp)]
+rownames(n2) = GO_df$gs_name[match(rownames(n2),GO_df$gs_exact_source)]
+
+draw_heatmap(n2,g,show_rownames = T,cluster_cols = F,scale = F,legend = T,annotation_legend = T)
+```
