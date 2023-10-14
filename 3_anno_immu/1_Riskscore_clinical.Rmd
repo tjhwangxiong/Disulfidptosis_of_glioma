@@ -1,0 +1,129 @@
+---
+title: "Risk score and clinical information"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = F,message = F)
+```
+
+### 1.riskscore and Subtype of glioma (LGG, GBM)
+
+```{r}
+load("../2_model/model_genes_survs.Rdata")
+table(survs$dat1$TYPE)
+table(survs$dat2$Histology)
+library(stringr)
+survs$dat2$TYPE = ifelse(str_detect(survs$dat2$Histology,"GBM"),"GBM","LGG")
+table(survs$dat2$TYPE)
+table(survs$dat3$Histology)
+survs$dat3$TYPE = ifelse(str_detect(survs$dat3$Histology,"GBM"),"GBM","LGG")
+table(survs$dat3$TYPE)
+
+table(survs$dat4$`histology:ch1`)
+survs$dat4$TYPE = ifelse(str_detect(survs$dat4$`histology:ch1`,"GBM"),"GBM","LGG")
+table(survs$dat4$TYPE)
+```
+
+KM plot for LGG and GBM respectively.
+
+```{r fig.width= 12,fig.height= 8}
+library(patchwork)
+library(survminer)
+library(survival)
+splots1 = list()
+splots2 = list()
+corhorts = c("TCGA","CGGA_array","CGGA","GSE16011")
+for(i in 1:4){
+  x = survs[[i]]
+  x1 = x[x$TYPE =="GBM",]
+  x1$Risk = ifelse(x1$fp<median(x1$fp,na.rm = T),"low","high")
+  x1$Risk = factor(x1$Risk,levels = c("low","high"))
+  sfit1 = survfit(Surv(time, event) ~ Risk, data = x1)
+  splots1[[i]] =  ggsurvplot(sfit1, pval = TRUE, palette = "jco", data = x1, legend = c(0.8, 0.8), title =paste(corhorts[[i]],"GBM"))$plot
+  
+  x2 = x[x$TYPE =="LGG",]
+  x2$Risk = ifelse(x2$fp<median(x2$fp,na.rm = T),"low","high")
+  x2$Risk = factor(x2$Risk,levels = c("low","high"))
+  sfit2 = survfit(Surv(time, event) ~ Risk, data = x2)
+  splots2[[i]] =  ggsurvplot(sfit2, pval = TRUE, palette = "jco", data =x2, legend = c(0.8, 0.8), title =paste(corhorts[[i]],"LGG"))$plot
+}
+wrap_plots(c(splots1,splots2),nrow = 2)
+```
+
+### The beeswarm plot
+
+```{r}
+library(ggpubr)
+library(ggbeeswarm)
+library(tidyr)
+plots = lapply(1:4, function(i){
+  #i = 1
+  x = drop_na(survs[[i]],TYPE,fp)
+  br = c(paste0("GBM","\n(n=",table(x$TYPE)["GBM"],")"),paste0("LGG","\n(n=",table(x$TYPE)["LGG"],")"))
+  ggplot(x,aes(x = TYPE,y = fp,fill = TYPE))+
+  geom_beeswarm(cex = 2,shape = 21)+
+  theme_bw()+
+  theme(legend.position = "none",panel.grid = element_blank(),plot.title = element_text(hjust = 0.5))+
+    labs(x = "",y = "Risk score",title = corhorts[[i]])+
+    scale_x_discrete(labels = br)+
+  stat_compare_means(aes(label = ..p.signif..),method = "wilcox.test",comparisons = list(c("GBM","LGG")))+
+  stat_summary(fun = median, fun.min = median, fun.max = median, 
+               geom = 'crossbar', width = 0.25, size = 0.4,color = 'black') +
+  stat_summary(fun.data = function(x) median_hilow(x, 0.5), 
+               geom = 'errorbar', width = 0.15, size = 1,color = 'black')+
+  scale_fill_manual(values = c("#f87669","#2fa1dd"))
+})
+wrap_plots(plots,nrow = 1)
+```
+
+### 2. IDH mutation, MTMG promoter methylation, 1p19q co-del
+
+#### 2.1 TCGA
+
+https://www.cbioportal.org/
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4754110/  supplementary dataset 8.
+
+```{r}
+colnames(survs[[1]])
+a = rio::import("NIHMS746836-supplement-8.xlsx",skip = 1)
+a = a[,c("Case",
+         "IDH status",
+         "Age (years at diagnosis)",
+         "Grade",
+         "Gender",
+         "MGMT promoter status",
+         "1p/19q codeletion")]
+colnames(a)[2:7] = c("IDH","age","grade","gender","Meth","1p19q")
+str(a)
+a$age = as.numeric(a$age)
+a[a=="NA"]=NA
+library(stringr)
+idh = merge(survs[[1]],a,by.x = "_PATIENT",by.y = "Case",all.x = T)
+head(idh)
+save(idh,file = "TCGA_idh.Rdata")
+```
+
+```{r fig.width= 10}
+dat = drop_na(idh,IDH)
+g1 = ggboxplot(dat,"IDH","fp",fill = "IDH")
+dat = drop_na(idh,Meth)
+g2 = ggboxplot(dat,"Meth","fp",fill = "Meth")
+dat = drop_na(idh,`1p19q`)
+g3 = ggboxplot(dat,"1p19q","fp",fill = "1p19q")
+g1 + g2 + g3 & stat_compare_means()&
+  scale_fill_manual(values = c("#f87669","#2fa1dd"))
+```
+
+### CGGA
+
+```{r fig.width= 10}
+dat = drop_na(survs[[2]],IDH_mutation_status,fp)
+g4 = ggboxplot(dat,"IDH_mutation_status","fp",fill = "IDH_mutation_status")
+dat = drop_na(survs[[2]],`1p19q_Codeletion_status`,fp)
+g5 = ggboxplot(dat,"1p19q_Codeletion_status","fp",fill = "1p19q_Codeletion_status")
+g4+g5& stat_compare_means()&
+  scale_fill_manual(values = c("#f87669","#2fa1dd"))
+```
