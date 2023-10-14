@@ -1,0 +1,206 @@
+---
+title: "surv_cox_lasso"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message = F,warning = F)
+```
+
+### disulfidptosis-related geneset
+
+```{r}
+gs = c("GYS1","OXSM","NDUFS1","LRPPRC","NDUFA11","NUBPL","NCKAP1","RPN1","SLC3A2","SLC7A11")
+```
+
+### univariable Cox regression and KM survival analyses 
+
+```{r}
+library(tinyarray)
+load("../1_data_pre/exp_surv1.Rdata")
+exp1 = exp1[rownames(exp1) %in% gs,]
+c1 = surv_cox(exp1,surv1,continuous = T)
+head(c1)
+nrow(c1)
+k1 = surv_KM(exp1,surv1)
+head(k1) 
+length(k1)
+g1 = intersect(rownames(c1),names(k1))
+head(g1)
+length(g1)
+```
+
+```{r}
+load("../1_data_pre/exp_surv2.Rdata")
+load("../1_data_pre/exp_surv3.Rdata")
+load("../1_data_pre/exp_surv4.Rdata")
+exp = list(exp1,exp2,exp3,exp4)
+surv = list(surv1,surv2,surv3,surv4)
+clist= list()
+klist=list()
+g = list()
+for(i in 1:4){
+  exp[[i]] = exp[[i]][rownames(exp[[i]]) %in% gs,]
+  c1 = surv_cox(exp[[i]],surv[[i]],continuous = T)
+  k = surv_KM(exp[[i]],surv[[i]])
+  clist[[i]]=data.frame(c1)
+  klist[[i]]=data.frame(k)
+  g[[i]] = intersect(rownames(c1),names(k))
+}
+names(clist) = c("TCGA","CGGA_array","CGGA","GSE16011")
+names(klist) = c("TCGA","CGGA_array","CGGA","GSE16011")
+names(g) = c("TCGA","CGGA_array","CGGA","GSE16011")
+clist=do.call(rbind,clist)
+library(stringr)
+clist$dataset=str_split(rownames(clist),'[.]',simplify =T)[,1]
+clist$gene=str_split(rownames(clist),'[.]',simplify =T)[,2]
+write.csv(clist,file="uni_cox.csv")
+klist=do.call(cbind,klist)
+colnames(klist) = c("TCGA","CGGA_array","CGGA","GSE16011")
+write.csv(klist,file="KM.csv")
+
+sapply(g, length)
+v_plot = draw_venn(g,"")
+ggplot2::ggsave(v_plot,filename = "venn.png")
+```
+
+```{r}
+g = intersect_all(g)
+length(g)
+```
+
+### lasso regression
+
+TCGA dataset was used to construct the model.
+```{r}
+library(survival)
+x = t(exp1[g,])
+y = data.matrix(Surv(surv1$time,surv1$event)) 
+library(glmnet)
+set.seed(10210)
+cvfit = cv.glmnet(x, y, family="cox") 
+fit=glmnet(x, y, family = "cox") 
+
+coef = coef(fit, s = cvfit$lambda.min) 
+index = which(coef != 0) 
+actCoef = coef[index] 
+lassoGene = row.names(coef)[index] 
+lassoGene
+
+par(mfrow = c(1,2))
+plot(cvfit) 
+plot(fit,xvar="lambda",label = F)
+```
+
+### Stepwise regression
+
+```{r}
+library(My.stepwise)
+vl <- lassoGene
+dat = cbind(surv1,t(exp1[lassoGene,]))
+# My.stepwise.coxph(Time = "time",
+#                   Status = "event",
+#                   variable.list = vl,
+#                   data = dat)
+
+model = coxph(formula = Surv(time, event) ~ LRPPRC + RPN1 + GYS1, 
+    data = dat)
+
+summary(model)$concordance
+genes = names(model$coefficients);length(genes)
+
+library(survminer)
+ggforest(model,data = dat)
+
+```
+
+### Calculate risk score
+
+```{r}
+dats  = list(dat1 = cbind(surv1,t(exp1[genes,])),
+             dat2 = cbind(surv2,t(exp2[genes,])),
+             dat3 = cbind(surv3,t(exp3[genes,])),
+             dat4 = cbind(surv4,t(exp4[genes,])))
+library(dplyr)
+survs = lapply(dats, function(x){
+  fp = apply(x[,genes], 1,function(k)sum(model$coefficients * k)) 
+  x$fp = fp
+  x$Risk = ifelse(x$fp<median(x$fp),"low","high")
+  x$Risk = factor(x$Risk,levels = c("low","high"))
+  return(x)
+})
+head(survs[[1]])
+save(model,genes,survs,file = "model_genes_survs.Rdata")
+```
+
+### timeROC curve
+
+```{r fig.width= 10 ,fig.height=10}
+library(timeROC)
+corhorts = c("TCGA","CGGA_array","CGGA","GSE16011")
+result = list()
+p = list()
+for(i in 1:4){
+  result[[i]] <-with(survs[[i]], timeROC(T=time,
+                     delta=event,
+                     marker=fp,
+                     cause=1,
+                     times=c(365,1095,1825),
+                     iid = TRUE))
+  dat = data.frame(fpr = as.numeric(result[[i]]$FP),
+                   tpr = as.numeric(result[[i]]$TP),
+                   time = rep(as.factor(c(365,1095,1825)),each = nrow(result[[i]]$TP)))
+  
+  library(ggplot2)
+  p[[i]] = ggplot() + 
+    geom_line(data = dat,aes(x = fpr, y = tpr,color = time),size = 1) + 
+    scale_color_manual(name = NULL,values = c("#92C5DE", "#F4A582", "#66C2A5"),
+                       labels = paste0("AUC of ",c(1,3,5),"-y survival: ",
+                                       format(round(result[[i]]$AUC,2),nsmall = 2)))+
+    geom_line(aes(x=c(0,1),y=c(0,1)),color = "grey")+
+    theme_bw()+
+    theme(panel.grid = element_blank(),
+          legend.background = element_rect(linetype = 1, size = 0.2, colour = "black"),
+          legend.position = c(0.765,0.125))+
+    scale_x_continuous(expand = c(0.005,0.005))+
+    scale_y_continuous(expand = c(0.005,0.005))+
+    ggtitle(corhorts[[i]]) +
+    labs(x = "1 - Specificity",
+         y = "Sensitivity")+
+    coord_fixed()
+  }
+library(patchwork)
+wrap_plots(p)
+
+```
+
+### KM_plot
+
+```{r}
+library(survival)
+library(survminer)
+corhorts = c("TCGA","CGGA_array","CGGA","GSE16011")
+splots = list()
+
+for(i in 1:4){
+  x = survs[[i]]
+  sfit1 = survfit(Surv(time, event) ~ Risk, data = x)
+  splots[[i]] =  ggsurvplot(sfit1, pval = TRUE, palette = "jco", 
+            data = x, legend = c(0.8, 0.8), title =corhorts[[i]],risk.table = T)
+}
+png("survs.png",height = 1200,width = 1000)
+arrange_ggsurvplots(splots,nrow = 2)
+dev.off()
+```
+
+### organize figures
+
+```{r}
+source("risk_plot.R")
+risk_plot(survs[[1]],genes)
+risk_plot(survs[[2]],genes)
+risk_plot(survs[[3]],genes)
+risk_plot(survs[[4]],genes)
+```
